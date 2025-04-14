@@ -14,6 +14,8 @@ library(gridExtra)
 library(grid)  
 library(timeROC)
 library(RColorBrewer) 
+library(ggprism)
+library(rstatix) 
 setwd("~/rprojects/TCGA-OV-RISK-PROJECT/Public data RDSs/")
 # Load train data ###################################
 gtex_counts_train <- readRDS("train_gtcga_normcounts_prot_2025.RDS")
@@ -295,3 +297,61 @@ grade_plot <- ggplot(clin_df_joined, aes(x=neoplasmhistologicgrade ,
            size = 5, color = "black")
 
 grade_plot
+
+#GTEX vs TCGA, boxplot ###########################
+#CREATE GROUPINGS ACCORDING TO DATA#
+snames = rownames(gtex_counts_train)
+group = substr(snames, 1, 4)
+group = as.factor(group)
+levels(group) <- c("GTEx", "TCGA-OV")
+gtex_counts_train2 <- gtex_counts_train
+gtex_counts_train2$group <- group
+expression <- res_coef_cox_names
+#get long df
+gtcga_table_full <- reshape2::melt(gtex_counts_train2[, colnames(gtex_counts_train2) %in%
+                                    c("group", expression )],
+                          id.vars="group",
+                          measure.vars= expression)
+#get t test
+t.test_gtex <- gtcga_table_full %>%
+  group_by(variable) %>%
+  t_test(value ~ group,
+         p.adjust.method = "BH", 
+         var.equal = TRUE, #stjudents
+         paired = FALSE, 
+         detailed=TRUE 
+  ) # Format p-values to remove scientific notation
+t.test_gtex
+#make a tibble of p values: ~group1, ~group2, ~p.adj,   ~y.position, ~variable
+t.test_gtex_tibble <- t.test_gtex %>% 
+  select(group1, group2, p, variable) %>%
+  mutate(
+    y.position = c(6, 8, 8, 9, 10, 
+                   8, 6, 6, 12, 12) #choose where to plot p values
+  )
+t.test_gtex_tibble$p_custom <- ifelse(t.test_gtex_tibble$p < 0.001, 
+                                       "p < 0.001", 
+                                       paste0("p = ", sprintf("%.3f",
+                                                              each.vs.ref_sig$pj)))
+#get colors 
+custom_colors <- c("GTEx" = "turquoise","TCGA-OV" = "deeppink") 
+#plot
+gtex_plot <- ggplot(gtcga_table_full, aes(x=group , y=value, fill = variable)) +
+  geom_boxplot( outlier.shape = NA , alpha=0.3, aes(fill = group )) +
+  geom_jitter(aes(color = group ), size=1, alpha=0.5) +
+  ylab(label = expression("Normalised expression")) + 
+  facet_wrap(.~ variable, nrow = 2, scales = "free") +
+  add_pvalue(t.test_gtex_tibble, label = "p_custom") + #pvalue
+  theme_minimal()+
+  theme(
+    strip.text.x = element_text(
+      size = 12, face = "bold.italic"
+    ),
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5))+
+  labs(x=NULL)+
+  stat_boxplot(geom ='errorbar')+
+  scale_fill_manual(values = custom_colors) +
+  scale_color_manual(values = custom_colors) 
+  
+gtex_plot
