@@ -355,3 +355,205 @@ gtex_plot <- ggplot(gtcga_table_full, aes(x=group , y=value, fill = variable)) +
   scale_color_manual(values = custom_colors) 
   
 gtex_plot
+
+#time rocs for separate biomarkers ######################################
+rez_list2 <- apply(coxnet.df, 2, timeROC,
+                   T = time2,       # Survival time from df
+                   delta = event2, # Event indicator from df
+                   #marker  # Predictor already in the df
+                   cause = 1,         # Event of interest
+                   times = t_eval,    # Time points for ROC
+                   iid = TRUE )        # Compute confidence intervals)
+
+auc_table <- map_dfr(names(rez_list2), function(gene) {
+  roc <- rez_list2[[gene]]
+  
+  tibble(
+    gene = gene,
+    time = roc$times,
+    cases = roc$cases,
+    survivors = roc$survivors,
+    censored = roc$censored,
+    auc = roc$AUC,
+    se = roc$inference$vect_sd_1
+  )
+})
+
+auc_table
+write.csv( auc_table, "~/rprojects/TCGA-OV-RISK-PROJECT/Outputs bioinfomatics/AUC.TABLE.csv")
+
+##plot at year 1###############
+# Choose target time
+target_time <- 365
+time_index <- which(rez_list2[[1]]$times == target_time)
+
+# Set up base plot with gene 1
+plot(
+  rez_list2[[1]]$FP[, time_index],
+  rez_list2[[1]]$TP[, time_index],
+  type = "l",
+  col = 1,
+  lwd = 2,
+  xlab = "1 - Specificity (FPR)",
+  ylab = "Sensitivity (TPR)",
+  main = paste("Time-dependent ROC Curves at", target_time, "days"),
+  xlim = c(0, 1),
+  ylim = c(0, 1),
+  asp = 1
+)
+
+# Add ROC lines for all genes
+for (i in 2:length(rez_list2)) {
+  lines(
+    rez_list2[[i]]$FP[, time_index],
+    rez_list2[[i]]$TP[, time_index],
+    col = i,
+    lwd = 2
+  )
+}
+
+# Add risk score ROC line in bold black
+lines(
+  roc_result$FP[, time_index],
+  roc_result$TP[, time_index],
+  col = "maroon",
+  lwd = 3,
+  lty = 1
+)
+
+# Add diagonal reference line
+abline(0, 1, lty = 2, col = "gray")
+
+# Build legend names: italic gene names + "risk score"
+legend_labels <- c(
+  parse(text = paste0("italic('", names(rez_list2), "')")),
+  "Risk Score"
+)
+
+# Add legend (last color is black for risk score)
+legend(
+  "bottomright",
+  legend = legend_labels,
+  col = c(1:length(rez_list2), "maroon"),
+  lwd = c(rep(2, length(rez_list2)), 3),
+  cex = 0.6,
+  bty = "n"
+)
+
+## plot at year 5###########################
+# Choose target time
+target_time <- 1825   #choose year 5
+time_index <- which(rez_list2[[1]]$times == target_time)
+
+# Set up base plot with gene 1
+plot(
+  rez_list2[[1]]$FP[, time_index],
+  rez_list2[[1]]$TP[, time_index],
+  type = "l",
+  col = 1,
+  lwd = 2,
+  xlab = "1 - Specificity (FPR)",
+  ylab = "Sensitivity (TPR)",
+  main = paste("Time-dependent ROC Curves at", target_time, "days"),
+  xlim = c(0, 1),
+  ylim = c(0, 1),
+  asp = 1
+)
+
+# Add ROC lines for all genes
+for (i in 2:length(rez_list2)) {
+  lines(
+    rez_list2[[i]]$FP[, time_index],
+    rez_list2[[i]]$TP[, time_index],
+    col = i,
+    lwd = 2
+  )
+}
+
+# Add risk score ROC line in bold 
+lines(
+  roc_result$FP[, time_index],
+  roc_result$TP[, time_index],
+  col = "maroon",
+  lwd = 3,
+  lty = 1
+)
+
+# Add diagonal reference line
+abline(0, 1, lty = 2, col = "gray")
+
+# Build legend names: italic gene names + "risk score"
+legend_labels <- c(
+  parse(text = paste0("italic('", names(rez_list2), "')")),
+  "Risk Score"
+)
+
+# Add legend (last color for risk score)
+legend(
+  "bottomright",
+  legend = legend_labels,
+  col = c(1:length(rez_list2), "maroon"),
+  lwd = c(rep(2, length(rez_list2)), 3),
+  cex = 0.6,
+  bty = "n"
+)
+
+##plot at year 3 ##########################
+# Choose target time
+target_time <- 1095      #choose year 3
+time_index <- which(rez_list2[[1]]$times == target_time)
+
+# Set up base plot with gene 1
+plot(
+  rez_list2[[1]]$FP[, time_index],
+  rez_list2[[1]]$TP[, time_index],
+  type = "l",
+  col = 1,
+  lwd = 2,
+  xlab = "1 - Specificity (FPR)",
+  ylab = "Sensitivity (TPR)",
+  main = paste("Time-dependent ROC Curves at", target_time, "days"),
+  xlim = c(0, 1),
+  ylim = c(0, 1),
+  asp = 1
+)
+
+# Add ROC lines for all genes
+for (i in 2:length(rez_list2)) {
+  lines(
+    rez_list2[[i]]$FP[, time_index],
+    rez_list2[[i]]$TP[, time_index],
+    col = i,
+    lwd = 2
+  )
+}
+
+# Add risk score ROC line in bold 
+lines(
+  roc_result$FP[, time_index],
+  roc_result$TP[, time_index],
+  col = "maroon",
+  lwd = 3,
+  lty = 1
+)
+
+# Add diagonal reference line
+abline(0, 1, lty = 2, col = "gray")
+
+# Build legend names: italic gene names + "risk score"
+legend_labels <- c(
+  parse(text = paste0("italic('", names(rez_list2), "')")),
+  "Risk Score"
+)
+
+# Add legend (last color for risk score)
+legend(
+  "bottomright",
+  legend = legend_labels,
+  col = c(1:length(rez_list2), "maroon"),
+  lwd = c(rep(2, length(rez_list2)), 3),
+  cex = 0.6,
+  bty = "n"
+)
+
+#
