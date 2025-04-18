@@ -1,14 +1,5 @@
 #THIS IS TCGA-OV-RISK-GENES project script No. 11
 #HEATMAP 
-
-# Load packages ##########################################
-library(ComplexHeatmap)
-library(tidyverse)
-library(RColorBrewer) 
-library(circlize)
-setwd("~/rprojects/TCGA-OV-RISK-PROJECT/Public data RDSs/")
-# Load train data ###################################
-gtex_counts_train <- readRDS("train_gtcga_normcounts_prot_2025.RDS")
 # Load packages ##########################################
 library(ComplexHeatmap)
 library(tidyverse)

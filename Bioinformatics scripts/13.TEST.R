@@ -37,6 +37,7 @@ clin_df$overall_survival = ifelse(clin_df$deceased,
 test_ids <- rownames(gtex_filtered_counts_test2)
 clin_df <- clin_df[clin_df$barcode %in% test_ids, ]  #79 samples
 rownames(clin_df) <- clin_df$barcode
+
 #JOIN CLINICAL (MOSTLY SURVIVAL DATA) WITH TRAIN DATA ########################
 #add all genes to clin_df
 colnames(clin_df)
@@ -365,3 +366,28 @@ legend(
   cex = 0.6,
   bty = "n"
 )
+
+#KM plot with RISK SCORE#################
+
+# Calculate the median risk score
+median_risk <- median(clin_df_joined_test$RiskScore, na.rm = TRUE) #--0.07747393
+# Create a new factor column based on the median value
+clin_df_joined_test$RiskGroup <- ifelse(clin_df_joined_test$RiskScore <= median_risk,
+                                   "Low Risk", "High Risk")
+#Create a survival object
+surv_object <- Surv(time = clin_df_joined_test$overall_survival,
+                    event = clin_df_joined_test$deceased )
+# Fit a Kaplan-Meier model
+km_fit <- survfit(surv_object ~ RiskGroup, data = clin_df_joined_test)
+# Plot the Kaplan-Meier curve using ggsurvplot
+ggsurvplot(km_fit, data = clin_df_joined_test, 
+           pval = TRUE,  # Show p-value of the log-rank test
+           risk.table = TRUE,  # Add risk table below the plot
+           title = "Kaplan-Meier Plot: Low vs. High Risk based on Risk Score in test cohort",
+           xlab = "Overall Survival Time",
+           ylab = "Survival Probability",
+           palette = c("turquoise", "deeppink"),  # Color palette for groups
+           legend.title = "Risk Group", 
+           legend.labs = c("Low Risk", "High Risk"))
+
+
