@@ -1,0 +1,257 @@
+#survival analysis of my data
+Sys.setenv(LANG = "en")
+#libraries
+library(survival)
+library(survminer)
+library(tidyverse)
+library(grid)
+library(gridExtra)
+library(patchwork)
+library(magick)
+library(survivalROC)
+library(purrr)
+library(broom)
+library(dplyr)
+library(timeROC)
+library(cowplot)
+#set wd for plots
+setwd("C:/Users/Ieva/rprojects/outputs_all/DISS/")
+#get one file for all data
+ALL_EXPRESSION_DF <- readRDS("../../OTHER DATA/KN-DISSERTATION FILES/ALL_expresssion_Df20250709.RDS")
+#get survival data as of 2025-09-11
+SURVIVAL_KN <- openxlsx::read.xlsx("../../OTHER DATA/KN-DISSERTATION FILES/KN_MIRTIES_FAILAS_20250911.xlsx")
+#make only surv df
+SURV <- SURVIVAL_KN[, c(2, 3,20, 21)]
+head(SURV)
+#join with main data
+ALL_SURV_EXPRESSION <- left_join(ALL_EXPRESSION_DF, SURV, by = "patient_id_aud")
+#remove random columns or rename
+ALL_SURV_EXPRESSION <-  ALL_SURV_EXPRESSION[, -c(1, 15, 32)]
+ALL_SURV_EXPRESSION <- ALL_SURV_EXPRESSION %>%
+  rename(tumor = tumor.y ,
+         KN = KN.y )
+rownames(ALL_SURV_EXPRESSION) <- ALL_SURV_EXPRESSION$patient_id_aud
+#remove NA from new surv data
+ALL_SURV_EXPRESSION <- ALL_SURV_EXPRESSION%>%
+  filter(!is.na(OS), !is.na(STATUS)) #58 observations
+#make levels of my gene expression data
+methylation <- c("ARID1A_met", "CDX2", "ALX4", "HOPX")
+genes <- c("NOTCH1", "NOTCH2", "NOTCH3", "NOTCH4",
+           "ARID1A", "CTNNB1", "FBXW7",
+           "JAG2", "DLL1", "HES1",
+           "EXO1", "RAD50", "PPT2", "LUC7L2", 
+           "PKP3", "CDCA5", "ZFPL1", "VPS33B", 
+           "GRB7", "TCEAL4")
+genes_f <- paste0(genes, "_f")
+genes10 <- c("EXO1", "RAD50", "PPT2", "LUC7L2", 
+             "PKP3", "CDCA5", "ZFPL1", "VPS33B", 
+             "GRB7", "TCEAL4")
+genes_notch <- genes[!genes %in% genes10]  #notch genes
+#in plots i use names with _f so add it
+genes10_f <- paste0(genes10, "_f")
+genes_notch_f <- paste0(genes_notch, "_f")
+
+#make levels of gene expresssion data
+ALL_SURV_EXPRESSION <- ALL_SURV_EXPRESSION %>%
+  mutate(
+    across(all_of(genes),
+           ~ factor(if_else(. > median(., na.rm = TRUE), "High", "Low")),
+           .names = "{.col}_f")
+  )
+
+#rename AGE (comes up later in multivariable cox)
+ALL_SURV_EXPRESSION <- ALL_SURV_EXPRESSION %>%
+  rename(Age = Amžius )
+colnames(ALL_SURV_EXPRESSION)
+
+#make factors
+ALL_SURV_EXPRESSION$Stage2 <- factor(ALL_SURV_EXPRESSION$Stage2)
+ALL_EXPRESSION_DF$Stage4 <- factor(ALL_EXPRESSION_DF$Stage4)
+ALL_EXPRESSION_DF$Grade2 <- factor(ALL_EXPRESSION_DF$Grade2)
+ALL_EXPRESSION_DF$CA125_f <- factor(ALL_EXPRESSION_DF$CA125_f)
+
+#remove non-OC (benign) cases#############################
+OC_SURV_EXPRESSION <- ALL_SURV_EXPRESSION %>%
+  filter(Grupė_Ieva != "Benign") #55 left#
+
+#HGSOC ONLY##########################
+HGSOC_SURV_EXPRESSION <- ALL_SURV_EXPRESSION %>%
+  filter(Grupė_Ieva == "HGSOC") #41 left#
+table(HGSOC_SURV_EXPRESSION$STATUS, useNA = "a") #17 dead
+
+#SURVIVAL DATA##############################################
+#get descriptive statistics on STATUS
+table(ALL_SURV_EXPRESSION$STATUS, useNA = "a") #19 was dead
+table(ALL_SURV_EXPRESSION$tumor
+      , ALL_SURV_EXPRESSION$STATUS, useNA = "a")
+fisher.test(table(ALL_SURV_EXPRESSION$tumor
+                  , ALL_SURV_EXPRESSION$STATUS, useNA = "a"))
+
+#COX REGRESION, UNIVARIATE, only OC#################################
+univ_results2 <- lapply(genes, function(gene) {
+  formula <- as.formula(paste("Surv(OS, STATUS) ~", gene))
+  cox_model <- coxph(formula, data = OC_SURV_EXPRESSION)
+  sum_cox <- summary(cox_model)
+  
+  # Extract hazard ratio, 95% CI, and p-value
+  if (!is.null(sum_cox$conf.int)) {
+    data.frame(
+      HR = sum_cox$conf.int[,"exp(coef)"],
+      lower95 = sum_cox$conf.int[,"lower .95"],
+      upper95 = sum_cox$conf.int[,"upper .95"],
+      pvalue = sum_cox$coefficients[,"Pr(>|z|)"]
+    )
+  } else {
+    data.frame(HR = NA, lower95 = NA, upper95 = NA, pvalue = NA)
+  }
+})
+
+# Combine results
+univ_df2 <- do.call(rbind, univ_results2)
+univ_df2$Gene <- genes_f
+univ_df2 <- univ_df2[, c("Gene", "HR", "lower95", "upper95", "pvalue")]
+print(univ_df2)
+
+
+#Multivariable cox, OC only CA125 and AGE#############################
+multi_results2 <- lapply(genes, function(gene) {
+  
+  # Select relevant columns: OS, STATUS, gene, Amžius, CA125
+  df_sub <- OC_SURV_EXPRESSION[, c("OS", "STATUS", gene, "Age", "CA125")]
+  
+  # Remove rows with missing values for this gene or covariates
+  df_sub <- na.omit(df_sub)
+  
+  # If too few patients, return NA
+  if(nrow(df_sub) < 2) return(data.frame(HR=NA, lower95=NA, upper95=NA, pvalue=NA, N=0))
+  
+  # Fit Cox
+  formula <- as.formula(paste("Surv(OS, STATUS) ~", gene, "+ Age + CA125"))
+  cox_model <- coxph(formula, data = df_sub)
+  sum_cox <- summary(cox_model)
+  
+  # Extract gene effect
+  gene_row <- which(rownames(sum_cox$coefficients) == gene)
+  data.frame(
+    HR = sum_cox$conf.int[gene_row, "exp(coef)"],
+    lower95 = sum_cox$conf.int[gene_row, "lower .95"],
+    upper95 = sum_cox$conf.int[gene_row, "upper .95"],
+    pvalue = sum_cox$coefficients[gene_row, "Pr(>|z|)"],
+    N = nrow(df_sub)
+  )
+})
+
+multi_df2 <- do.call(rbind, multi_results2)
+multi_df2$Gene <- genes
+multi_df2 <- multi_df2[, c("Gene", "HR", "lower95", "upper95", "pvalue", "N")]
+multi_df2$Gene <- paste0(multi_df2$Gene, "_f") #fix for plot, does not mean I use factor variables
+print(multi_df2)
+
+
+#ENGLISH OC SUVRVIVAL KM SEPARATE#####################
+plots2x <- list()
+
+for (gene in genes_f) {
+  gene_clean <- sub("_f$", "", gene)
+  
+  # Fit KM survival curve
+  fit <- survfit(as.formula(paste("Surv(OS, STATUS) ~", gene)), 
+                 data = OC_SURV_EXPRESSION)
+  
+  ## --- Univariate HR ---
+  hr_row <- univ_df2[univ_df2$Gene == gene, ]
+  if (nrow(hr_row) == 0 || any(is.na(hr_row$HR))) {
+    hr_text <- "Univ HR = NA"
+  } else {
+    hr_text <- sprintf("Univ HR = %.2f (95%% CI: %.2f–%.2f)", 
+                       hr_row$HR, hr_row$lower95, hr_row$upper95)
+  }
+  
+  ## --- KM log-rank p-value ---
+  survdiff_res <- survdiff(as.formula(paste("Surv(OS, STATUS) ~", gene)), 
+                           data = OC_SURV_EXPRESSION)
+  pval_km <- 1 - pchisq(survdiff_res$chisq, length(survdiff_res$n) - 1)
+  pval_text <- sprintf("Log-rank p = %.3f", pval_km)
+  if (pval_km < 0.05) {
+    pval_text <- paste0("**", pval_text, "**")  # Markdown bold
+  }
+  
+  ## --- Multivariable HR (Age + CA125) ---
+  multi_row <- multi_df2[multi_df2$Gene == gene, ]
+  if (nrow(multi_row) == 0 || any(is.na(multi_row$HR))) {
+    hr_multi_text <- "Multiv HR = NA"
+  } else {
+    hr_multi_text <- sprintf("Multiv HR = %.2f (95%% CI: %.2f–%.2f, N=%d)", 
+                             multi_row$HR, multi_row$lower95, multi_row$upper95, multi_row$N)
+    if (!is.na(multi_row$pvalue) && multi_row$pvalue < 0.05) {
+      hr_multi_text <- paste0("**", hr_multi_text, "**")  # Markdown bold
+    }
+  }
+  
+  ## --- Combine 3 lines in subtitle ---
+  subtitle_text <- paste(hr_text, pval_text, hr_multi_text, sep = "\n")
+  
+  ## --- Legend labels ---
+  legend_labels <- c(
+    bquote(italic(.(gene_clean)) ~ " Low"),
+    bquote(italic(.(gene_clean)) ~ " High")
+  )
+  
+  ## --- KM plot ---
+  p <- ggsurvplot(
+    fit,
+    data = OC_SURV_EXPRESSION,
+    pval = FALSE,
+    risk.table = TRUE,
+    legend.title = "",
+    palette = c("blue", "red")
+  )$plot +
+    scale_color_manual(
+      values = c("blue", "red"),
+      labels = legend_labels
+    ) +
+    labs(
+      title = bquote(italic(.(gene_clean))),
+      subtitle = subtitle_text,
+      x = "Time, months",
+      y = "Survival probabilities"
+    ) +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 20),
+      plot.subtitle = element_text(size = 20, hjust = 0.5, lineheight = 1.2)
+    )
+  
+  plots2x[[gene]] <- p
+}
+
+# Combine plots and add overall title
+combined_plotx2 <- wrap_plots(plots2x, ncol = 4) +
+  plot_annotation(
+    title = "Survival analysis of OC",
+    theme = theme(
+      plot.title = element_text(size = 20, face = "bold", hjust = 0.5)
+    )
+  )
+
+# Subset plots for the two gene sets
+plots_genes10_2x <- plots2x[names(plots2x) %in% genes10_f]
+plots_genes_notch_2x <- plots2x[names(plots2x) %in% genes_notch_f]
+
+# Combine separately
+combined_plot_genes10_2x <- wrap_plots(plots_genes10_2x, ncol = 2)+
+  plot_annotation(
+    title = "Survival analysis of OC",
+    theme = theme(
+      plot.title = element_text(size = 20, face = "bold", hjust = 0.5)
+    ))
+
+#save 10 gene
+ggsave(
+  filename = "KM_combined_plot_w_HR_OC_10_gene_20251111vertical.png",  # output file name
+  plot = combined_plot_genes10_2x,               # the patchwork plot object
+  width = 16,                         # width in inches
+  height = 25,                        # height in inches
+  dpi = 400                           # resolution
+)
+
+
