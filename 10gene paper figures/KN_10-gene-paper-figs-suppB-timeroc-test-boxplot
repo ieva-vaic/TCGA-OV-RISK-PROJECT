@@ -1,0 +1,351 @@
+#ROCs, boxplots with TCGA, test data
+# Load packages ##########################################
+Sys.setenv(LANG = "en")
+library(tidyverse)
+library(data.table)
+library(glmnet)
+library(tidyverse)
+library(gplots)
+library(survminer)
+library(survivalROC)
+library(survival)
+library(gridExtra)
+library(grid)  
+library(timeROC)
+library(RColorBrewer) 
+library(ggprism)
+library(patchwork)
+library(rstatix) 
+library(magick)
+library(gt)
+library(multcomp)
+library(FSA)
+library(cowplot)
+#set directory of the data
+setwd("../TCGA-OV-RISK-PROJECT/Public data RDSs/")
+# Load test data ###################################
+gtex_counts_test <- readRDS("test_gtcga_normcounts_prot_2025.RDS")
+#filter for lasso genes
+gtex_genes <- readRDS("gtcga_elastic_2025.RDS")
+gtex_filtered_counts_test <- gtex_counts_test[colnames(gtex_counts_test) %in% gtex_genes] 
+#filter for TCGA cases
+gtex_filtered_counts_test2 <- gtex_filtered_counts_test %>%
+  dplyr::filter(grepl("^TCGA", rownames(gtex_filtered_counts_test)))
+dim(gtex_filtered_counts_test2)
+# Load clinical data ###################################
+clin_df <- readRDS("joinedTCGA_XENA_clinical2025.RDS")
+#fix survival
+clin_df$deceased = clin_df$vital_status == "Dead"
+clin_df$overall_survival = ifelse(clin_df$deceased,
+                                  clin_df$days_to_death,
+                                  clin_df$days_to_last_follow_up)
+#Filter clinical data###################################
+test_ids <- rownames(gtex_filtered_counts_test2)
+clin_df <- clin_df[clin_df$barcode %in% test_ids, ]  #79 samples
+rownames(clin_df) <- clin_df$barcode
+
+#Join clinical (mostly survival) data with train data ########################
+#add all genes to clin_df
+colnames(clin_df)
+gtex_filtered_counts_test2$barcode <- rownames(gtex_filtered_counts_test2)
+clin_df$barcode == gtex_filtered_counts_test2$barcode 
+clin_df_joined_test <- left_join(clin_df, gtex_filtered_counts_test2, by = "barcode")
+rownames(clin_df_joined_test) <- clin_df_joined_test$barcode
+colnames(clin_df_joined_test)
+
+# Load cox model ###################################
+cvfit <- readRDS("coxnet_cvfit_2025.RDS")
+cox_fitx <- readRDS("coxnet_fit_2025.RDS")
+
+#get coeficients - gene names
+coef_x <- coef(cox_fitx, s = 0.088)
+head(coef_x)
+coef_x = coef_x[coef_x[,1] != 0,] 
+res_coef_cox_names = names(coef_x) # get names of the (non-zero) variables.
+res_coef_cox_names #10
+
+#RISK SCORE ##################################
+# - cv_model: Your trained cv.glmnet model
+cv_model <- cvfit
+# - gene_data: A data frame (or matrix) with the expression values for your genes 
+# (rows = samples, columns = genes)
+# It should have the same feature names as used in the model (genes).
+gene_data_test <- clin_df_joined_test[, res_coef_cox_names]
+# - gene_list: A vector with the list of genes you're interested in.
+res_coef_cox_names
+# coefs
+# Extract coefficients at optimal lambda
+coefs <- coef_x
+coefs_df <- as.data.frame(as.matrix(coefs))
+coefs_df <- rownames_to_column(coefs_df, var = "Feature")
+colnames(coefs_df)[2] <- "Coefficient"
+print(coefs_df)
+# Calculate the risk score: linear combination of gene expressions and coefficients
+# Risk score = sum( gene_expression * coefficient )
+risk_scores_test <- rowSums(sweep(gene_data_test, 2, coefs_df$Coefficient, "*"))
+# View the risk scores
+print(risk_scores_test) # now I have some risk scores
+#add risk scores to the clin_df_joined_test
+clin_df_joined_test$RiskScore <- risk_scores_test[rownames(clin_df_joined_test)]
+#create df wih survival data
+surv_df_test <- clin_df_joined_test[, colnames(clin_df_joined_test) %in%
+                                      c("deceased", "overall_survival", res_coef_cox_names, "RiskScore")]
+surv_df_test <- surv_df_test %>%
+  dplyr::rename(censor = deceased, surv_time = overall_survival) 
+#TIME ROC, Risk score #######################
+#create features for timeroc
+nobs <- NROW(surv_df_test)
+#make surf df but only of my genes!
+time <- surv_df_test$surv_time
+event <- surv_df_test$censor
+#time roc
+t_eval <- c(365, 1095, 1825)  # time points
+roc_result <- timeROC(
+  T = time,       # Survival time from df
+  delta = event, # Event indicator from df
+  marker = surv_df_test[, "RiskScore"], # Predictor or risk score from df
+  cause = 1,         # Event of interest
+  times = t_eval,    # Time points for ROC
+  iid = TRUE         # Compute confidence intervals
+)
+roc_result
+#time rocs for separate biomarkers ######################################
+
+coxnet.df <- surv_df_test[, (colnames(surv_df_test) %in% res_coef_cox_names)]
+dim(coxnet.df)
+
+rez_list <- apply(coxnet.df, 2, timeROC,
+                  T = time,       # Survival time from df
+                  delta = event, # Event indicator from df
+                  #marker  # Predictor already in the df
+                  cause = 1,         # Event of interest
+                  times = t_eval,    # Time points for ROC
+                  iid = TRUE )        # Compute confidence intervals)
+
+auc_table <- map_dfr(names(rez_list), function(gene) {
+  roc <- rez_list[[gene]]
+  
+  tibble(
+    gene = gene,
+    time = roc$times,
+    cases = roc$cases,
+    survivors = roc$survivors,
+    censored = roc$censored,
+    auc = roc$AUC,
+    se = roc$inference$vect_sd_1
+  )
+})
+
+auc_table
+
+#ENGLSIH plot at year 5 with saving###########################
+# Choose target time
+target_time <- 1825   # choose year 5
+time_index <- which(rez_list[[1]]$times == target_time)
+
+# plot with save
+png("C:/Users/Ieva/rprojects/outputs_all/DISS/10_genų_timeROC_test202501112EN.png",
+    width = 1000, height = 1000, res = 200)
+
+par(pty="s")
+
+# Base plot with first gene
+plot(
+  rez_list[[1]]$FP[, time_index],
+  rez_list[[1]]$TP[, time_index],
+  type = "l",
+  col = 1,
+  lwd = 2,
+  xlab = "1- Specificity",
+  ylab = "Sensitivity",
+  main = paste("ROC curves,\n5 years from diagnosis, Test cohort"),
+  xlim = c(0, 1),
+  ylim = c(0, 1),
+  asp = 1
+)
+
+# Add ROC lines for all genes
+for (i in 2:length(rez_list)) {
+  lines(
+    rez_list[[i]]$FP[, time_index],
+    rez_list[[i]]$TP[, time_index],
+    col = i,
+    lwd = 2
+  )
+}
+
+# Add risk score ROC line in bold
+lines(
+  roc_result$FP[, time_index],
+  roc_result$TP[, time_index],
+  col = "maroon",
+  lwd = 3,
+  lty = 1
+)
+
+# Add diagonal reference line
+abline(0, 1, lty = 2, col = "gray")
+
+# Build legend labels without AUC
+legend_labels <- c(paste0("italic('", names(rez_list), "')"),
+                   "'Risk score'")
+
+# Add legend
+legend(
+  "bottomright",
+  legend = parse(text = legend_labels),
+  col = c(1:length(rez_list), "maroon"),
+  lwd = c(rep(2, length(rez_list)), 3),
+  cex = 0.6,
+  bty = "n"
+)
+
+# Add panel label
+mtext("B", side = 3, line = 2.5, adj = -0.2, font = 2, cex = 1.5)
+
+dev.off()
+
+#COORDS table #####################################################
+
+# extract best sens/spec at a given time
+extract_coords <- function(roc, gene, timepoint = 1825) {
+  idx <- which(roc$times == timepoint)
+  
+  # sensitivity & specificity across thresholds
+  sens <- as.vector(roc$TP[, idx])
+  spec <- as.vector(1 - roc$FP[, idx])
+  
+  # Youden index to pick best threshold
+  youden <- sens + spec - 1
+  best_idx <- which.max(youden)
+  
+  tibble(
+    gene = gene,
+    #time = roc$times[idx],
+    auc = roc$AUC[idx] * 100,
+    sens = sens[best_idx],
+    spec = spec[best_idx],
+    cutoff = roc$cutoffs[best_idx]
+  )
+}
+
+# Apply to each biomarker
+sens_spec_auc_60 <- map_dfr(names(rez_list), ~ extract_coords(rez_list[[.x]], .x, 1825))
+
+# Apply to risk score
+risk_score_row <- extract_coords(roc_result, "Risk score", 1825)
+
+# Combine into one tibble
+sens_spec_auc_60_all <- bind_rows(sens_spec_auc_60, risk_score_row)
+# View
+sens_spec_auc_60_all
+
+#make prety table
+# Prepare table: rename columns for display
+roc_table_display <- sens_spec_auc_60_all %>%
+  rename(
+    Biomarker = gene,
+    #Time_Days = time,
+    AUC = auc,
+    Sensitivity = sens,
+    Specificity = spec
+  )
+
+# Create gt table
+gt_table_roc_60 <- roc_table_display %>%
+  gt() %>%
+  tab_header(
+    title = "ROC criteria",
+    subtitle = "Prognostic criteria for 5 year survival"
+  ) %>%
+  fmt_number(
+    columns = vars(AUC, Sensitivity, Specificity),
+    decimals = 3
+  ) %>%
+  tab_style(
+    style = cell_text(style = "italic"),
+    locations = cells_body(columns = vars(Biomarker))
+  )
+
+# Show table
+gt_table_roc_60
+
+#there is no other convenient way to save gt outputs
+gtsave(gt_table_roc_60,
+       filename = "C:/Users/Ieva/rprojects/outputs_all/DISS/TEST_timeroc_table_20251112EN.png")
+
+#Combine the images
+roc_image <- image_read("C:/Users/Ieva/rprojects/outputs_all/DISS/10_genų_timeROC_test202501112EN.png")
+table_image <- image_read("C:/Users/Ieva/rprojects/outputs_all/DISS/TEST_timeroc_table_20251112EN.png")
+
+combined_image <- image_append(c(roc_image, table_image), stack = F)
+
+# Save the combined image
+image_write(combined_image, 
+            "C:/Users/Ieva/rprojects/outputs_all/DISS/TESTROC_W_TABLE20251112EN.png")
+
+#GTEX vs TCGA, boxplot EN###########################
+#CREATE GROUPINGS ACCORDING TO DATA#
+snames = rownames(gtex_counts_test)
+group = substr(snames, 1, 4)
+group = as.factor(group)
+levels(group) <- c("GTEx", "TCGA-OV")
+gtex_counts_test2 <- gtex_counts_test
+gtex_counts_test2$group <- group
+#get genes of interest
+expression <- c( "EXO1",   "RAD50",  "PPT2",   "LUC7L2", "PKP3",
+                 "CDCA5",  "ZFPL1" , "VPS33B", "GRB7",   "TCEAL4")
+#get long df
+gtcga_table_full <- reshape2::melt(gtex_counts_test2[, colnames(gtex_counts_test2) %in%
+                                                       c("group", expression )],
+                                   id.vars="group",
+                                   measure.vars= expression)
+#get t test
+t.test_gtex <- gtcga_table_full %>%
+  group_by(variable) %>%
+  t_test(value ~ group,
+         p.adjust.method = "BH", 
+         var.equal = TRUE, #stjudents
+         paired = FALSE, 
+         detailed=TRUE 
+  ) # Format p-values to remove scientific notation
+t.test_gtex
+#make a tibble of p values: ~group1, ~group2, ~p.adj,   ~y.position, ~variable
+t.test_gtex_tibble <- t.test_gtex %>% 
+  dplyr::select(group1, group2, p, variable) %>%
+  mutate(
+    y.position = c(6, 8, 8, 8.5, 10, 
+                   8, 6, 6, 13, 11) #choose where to plot p values
+  )
+t.test_gtex_tibble$p_custom <- ifelse(t.test_gtex_tibble$p < 0.001, 
+                                      "***", 
+                                      paste0("p = ", sprintf("%.3f",
+                                                             each.vs.ref_sig$pj)))
+#get colors 
+custom_colors <- c("GTEx" = "darkgreen","TCGA-OV" = "purple") 
+#plot
+gtex_plot <- ggplot(gtcga_table_full, aes(x=group , y=value, fill = variable)) +
+  geom_boxplot( outlier.shape = NA , alpha=0.3, aes(fill = group )) +
+  geom_jitter(aes(color = group ), size=1, alpha=0.5) +
+  ylab(label = expression("Normalized expression")) + 
+  facet_wrap(.~ variable, nrow = 2, scales = "free") +
+  add_pvalue(t.test_gtex_tibble, label = "p_custom", label.size = 6) + #pvalue
+  theme_minimal()+
+  theme(
+    strip.text.x = element_text(
+      size = 12, face = "bold.italic"
+    ),
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5))+
+  labs(x=NULL)+
+  stat_boxplot(geom ='errorbar')+
+  scale_fill_manual(values = custom_colors) +
+  scale_color_manual(values = custom_colors) + 
+  scale_y_continuous(labels = function(x) gsub("-", "\u2212", x))
+#show plot
+gtex_plot
+#save gtex vs tca test plot
+png("C:/Users/Ieva/rprojects/outputs_all/DISS/test_barplot_20251112.png",
+    width = 1500, height = 1500, res = 230) # width and height in pixels, resolution in dpi
+gtex_plot #
+dev.off() # Close the PNG device
