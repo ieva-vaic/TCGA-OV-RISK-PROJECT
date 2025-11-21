@@ -1,0 +1,56 @@
+#Describe main genes
+# Load packages ##########################################
+Sys.setenv(LANG = "en")
+library(org.Hs.eg.db)
+library(dplyr)
+library(clusterProfiler)
+library(enrichplot)
+library(msigdbr)
+library(tidyverse)
+#set directory of the data
+setwd("../TCGA-OV-RISK-PROJECT/Public data RDSs/")
+# Load train data ###################################
+gtex_counts_train <- readRDS("train_gtcga_normcounts_prot_2025.RDS")
+#filter for lasso genes
+gtex_genes <- readRDS("gtcga_elastic_2025.RDS")
+gtex_filtered_counts_train <- gtex_counts_train[colnames(gtex_counts_train) %in% gtex_genes] 
+
+# Get annotations for 214 genes ##########################
+gene_info <- AnnotationDbi::select(org.Hs.eg.db,
+                                   keys = gtex_genes,
+                                   keytype = "SYMBOL",
+                                   columns = c("SYMBOL", "GENENAME", "ENTREZID", "ENSEMBL"))
+
+head(gene_info)
+# Get annotations for main 10 genes ##########################
+#get genes of interest
+expression <- c( "EXO1",   "RAD50",  "PPT2",   "LUC7L2", "PKP3",
+                 "CDCA5",  "ZFPL1" , "VPS33B", "GRB7",   "TCEAL4")
+gene_info10 <- AnnotationDbi::select(org.Hs.eg.db,
+                                     keys = expression,
+                                     keytype = "SYMBOL",
+                                     columns = c("SYMBOL", "GENENAME", "ENTREZID", "ENSEMBL"))
+
+head(gene_info10)
+
+#Functional enrichment 214 genes#################################
+# Get Entrez IDs
+entrez_ids <- gene_info$ENTREZID
+
+# GO enrichment (Biological Process)
+ego <- enrichGO(gene = entrez_ids,
+                OrgDb = org.Hs.eg.db,
+                ont = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff = 0.05,
+                readable = TRUE)
+
+dotplot <- dotplot(ego, showCategory =15) +
+  ggtitle("GO Enrichment for Elastic net selected genes") +
+  theme_minimal() +
+  theme(plot.title = element_text(hjust = 0.5))
+#save dotplot
+png("C:/Users/Ieva/rprojects/outputs_all/DISS/gene_enrichment_20251112.png",
+    width = 1500, height = 1200, res = 200) # width and height in pixels, resolution in dpi
+dotplot #
+dev.off() # Close the PNG device
