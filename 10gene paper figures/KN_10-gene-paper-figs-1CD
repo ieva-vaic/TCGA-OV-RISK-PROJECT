@@ -1,0 +1,163 @@
+#Make the main figure 1C and 1D
+# Load packages ##########################################
+Sys.setenv(LANG = "en")
+library(tidyverse)
+library(data.table)
+library(glmnet)
+library(tidyverse)
+library(gplots)
+library(survminer)
+library(survivalROC)
+library(survival)
+library(gridExtra)
+library(grid)  
+library(timeROC)
+library(RColorBrewer) 
+library(ggprism)
+library(rstatix) 
+library(patchwork)
+library(magick)
+library(gt)
+library(multcomp)
+library(FSA)
+library(cowplot)
+#set directory of the data
+setwd("../TCGA-OV-RISK-PROJECT/Public data RDSs/")
+# Load train data ###################################
+gtex_counts_train <- readRDS("train_gtcga_normcounts_prot_2025.RDS")
+#filter for lasso genes
+gtex_genes <- readRDS("gtcga_elastic_2025.RDS")
+gtex_filtered_counts_train <- gtex_counts_train[colnames(gtex_counts_train) %in% gtex_genes] 
+#filter for TCGA cases
+gtex_filtered_counts_train2 <- gtex_filtered_counts_train %>%
+  dplyr::filter(grepl("^TCGA", rownames(gtex_filtered_counts_train)))
+dim(gtex_filtered_counts_train2)
+#gtex_filtered_counts_train2 <- as.data.frame(t(gtex_filtered_counts_train2))
+#get genes of interest
+expression <- c( "EXO1",   "RAD50",  "PPT2",   "LUC7L2", "PKP3",
+                 "CDCA5",  "ZFPL1" , "VPS33B", "GRB7",   "TCEAL4")
+# Load clinical data ###################################
+clin_df <- readRDS("joinedTCGA_XENA_clinical2025.RDS")
+#fix survival
+clin_df$deceased = clin_df$vital_status == "Dead"
+clin_df$overall_survival = ifelse(clin_df$deceased,
+                                  clin_df$days_to_death,
+                                  clin_df$days_to_last_follow_up)
+#Filter clinical data###################################
+train_ids <- rownames(gtex_filtered_counts_train2)
+clin_df <- clin_df[clin_df$barcode %in% train_ids, ]  #336 samples
+rownames(clin_df) <- clin_df$barcode
+#Join clinical (mostly survival) with train data ########################
+#add all genes to clin_df
+colnames(clin_df)
+gtex_filtered_counts_train2$barcode <- rownames(gtex_filtered_counts_train2)
+clin_df$barcode == gtex_filtered_counts_train2$barcode 
+clin_df_joined <- left_join(clin_df, gtex_filtered_counts_train2, by = "barcode")
+rownames(clin_df_joined) <- clin_df_joined$barcode
+colnames(clin_df_joined)
+#saveRDS(clin_df_joined, "clin_df_joined_2025.RDS")
+# Load cox model ###################################
+cvfit <- readRDS("coxnet_cvfit_2025.RDS")
+cox_fitx <- readRDS("coxnet_fit_2025.RDS")
+
+#get coeficients - gene names
+coef_x <- coef(cox_fitx, s = 0.088)
+head(coef_x)
+coef_x = coef_x[coef_x[,1] != 0,] 
+res_coef_cox_names = names(coef_x) # get names of the (non-zero) variables.
+res_coef_cox_names #10
+
+#Value of coeficients plot ##################################
+cv_model <- cvfit
+# Extract coefficients at optimal lambda
+coefs <- coef_x
+coefs_df <- as.data.frame(as.matrix(coefs))
+coefs_df <- rownames_to_column(coefs_df, var = "Feature")
+colnames(coefs_df)[2] <- "Coefficient"
+print(coefs_df)
+# Plot coeficients ###########################
+# get colors
+n_features <- nrow(coefs_df)
+colors <- colorRampPalette(brewer.pal(9, "Set3"))(n_features)  # Light pastel rainbow colors
+# Pretty ggplot2 
+plot_coef <- ggplot(coefs_df, aes(x = reorder(Feature, Coefficient), y = Coefficient, fill = Feature)) +
+  geom_bar(stat = "identity", alpha = 0.8, width = 0.8) +  # Colorful bars
+  scale_fill_manual(values = colors) +  # Apply colors to bars
+  coord_flip() +
+  theme_minimal(base_size = 10) +
+  labs( x = "Genes", y = "Log hazard ratios per 1 sd increase in the gene expression") +
+  theme(
+    axis.text.y = element_text(face = "italic"),  # Italic feature names
+    panel.grid.major.y = element_blank(),  # Remove gridlines for cleaner look
+    panel.grid.minor = element_blank(),
+    legend.position = "none"  # Hide legend for a clean visual
+  )
+#save value of coeficients plot
+png("C:/Users/Ieva/rprojects/outputs_all/DISS/coeficient_plot_bar20251112.png",
+    width = 900, height = 800, res = 200) 
+plot_coef 
+dev.off() 
+
+#RISK SCORE ##################################
+# - cv_model: Your trained cv.glmnet model
+cv_model
+# - gene_data: A data frame (or matrix) with the expression values for your genes 
+# (rows = samples, columns = genes)
+# It should have the same feature names as used in the model (genes).
+gene_data <- clin_df_joined[, res_coef_cox_names]
+# - gene_list: A vector with the list of genes you're interested in.
+res_coef_cox_names
+# coefs
+coefs_df
+# Calculate the risk score: linear combination of gene expressions and coefficients
+# Risk score = sum( gene_expression * coefficient )
+risk_scores <- rowSums(sweep(gene_data, 2, coefs_df$Coefficient, "*"))
+# View the risk scores
+print(risk_scores) # now I have some risk scores
+
+#add risk scores to the clin_df_joined
+clin_df_joined$RiskScore <- risk_scores[rownames(clin_df_joined)]
+
+#survival time vs coeficient plot ##################################
+clin_df_joined$overall_survival
+clin_df_joined$RiskScore
+clin_df_joined$vital_status
+clin_df_joined$overall_survival_months <-clin_df_joined$overall_survival / 30.44
+#Kaplan-meier plot RISK SCORE ##################################
+# Calculate the median risk score
+median_risk <- median(clin_df_joined$RiskScore, na.rm = TRUE) #-0.05914624
+# Create a new factor column based on the median value
+clin_df_joined$RiskGroup <- ifelse(clin_df_joined$RiskScore <= median_risk, "Low Risk", "High Risk")
+#Create a survival object
+surv_object <- Surv(time = clin_df_joined$overall_survival_months, event = clin_df_joined$deceased )
+# Fit a Kaplan-Meier model
+km_fit <- survfit(surv_object ~ RiskGroup, data = clin_df_joined)
+# Compute log-rank test
+surv_test <- survdiff(Surv(overall_survival_months, deceased) ~ RiskGroup, data = clin_df_joined)
+pval_num <- 1 - pchisq(surv_test$chisq, length(surv_test$n) - 1)
+# Format nicely
+if (pval_num < 0.001) {
+  pval_text <- "Long-rank p < 0.001"
+} else {
+  pval_text <- paste0("Long-rank p = ", signif(pval_num, 3))
+}
+# Plot
+train_surv <- ggsurvplot(
+  km_fit, 
+  data = clin_df_joined, 
+  pval = TRUE,  # disable built-in
+  risk.table = TRUE,
+  risk.table.title = "Number at risk",
+  #title = "High vs low risk score in the training cohort",
+  xlab = "Survival time, months",
+  ylab = "Survival probablility",
+  palette = c( "maroon", "darkblue"),
+  legend.title = "Risk group", 
+  legend.labs = c( "High risk group", "Low risk group")
+)
+
+#save km plot
+png("C:/Users/Ieva/rprojects/outputs_all/DISS/dis_lt_km_train20251112.png",
+    width = 800, height = 600, res = 100) # width and height in pixels, resolution in dpi
+train_surv #
+dev.off() # Close the PNG device
