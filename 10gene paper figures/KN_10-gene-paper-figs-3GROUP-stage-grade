@@ -1,0 +1,525 @@
+#Make ANOVA figures
+Sys.setenv(LANG = "en")
+#libraries
+library(tidyverse)
+library(pROC)
+library(glmnet)
+library(gtsummary)
+library(gt)
+library(brglm2)
+library(reshape2)
+library(rstatix) 
+library(ggprism)
+library(gridExtra)
+library(scales)
+library(multcomp)
+library(FSA)
+#set wd for plots
+setwd("C:/Users/Ieva/rprojects/outputs_all/DISS/")
+#data###################################################################
+OC_full <- readRDS("C:/Users/Ieva/rprojects/OTHER DATA/KN-DISSERTATION FILES/OC_10_genes_clean_2025_02_14.RDS")
+#expression genes list
+expression <- c("EXO1", "RAD50","PPT2", "LUC7L2","PKP3", "CDCA5","ZFPL1","VPS33B", "GRB7","TCEAL4")
+#for anova, make factors
+OC_full$type <- factor(OC_full$type)
+OC_full$Stage4 <- factor(OC_full$Stage4)
+OC_full$Stage2 <- factor(OC_full$Stage2)
+OC_full$Grade2 <- factor(OC_full$Grade2)
+#HGSOC only
+HGSOC_only <- OC_full %>%
+  filter(type == "HGSOC") 
+table(HGSOC_only$Stage4, useNA = "a")
+
+table(HGSOC_only$type, HGSOC_only$Stage2) 
+table(HGSOC_only$type, HGSOC_only$Stage4) 
+#OC only
+OC_only <- OC_full %>%
+  filter(tumor == "OC") 
+table(OC_only$Stage4, useNA = "a")
+
+#3 groups STAGE, HGSOC ##################################
+#levene test for variance, stage, hgsoc
+levene_rez2 <- HGSOC_only[, c(3:12, 15)] %>%
+  pivot_longer(cols = -Stage4 , names_to = "variable", values_to = "value") %>%
+  group_by(variable) %>%
+  summarise(
+    p_value = car::leveneTest(value ~ Stage4 )$`Pr(>F)`[1],
+    .groups = "drop"
+  )
+levene_rez2  #all normal
+
+##anova, stage################################
+results2 <- lapply(names(HGSOC_only)[c(3:12)], function(var) {
+  formula <- as.formula(paste(var, "~ Stage4"))
+  fit <- aov(formula, data = HGSOC_only)
+  
+  list(
+    variable = var,
+    summary = summary(fit),
+    shapiro = shapiro.test(residuals(fit))
+  )
+})
+
+names(results2) <- names(HGSOC_only)[c(3:12)]
+#make df of results
+results_df2 <- lapply(results2, function(x) {
+  data.frame(
+    variable   = x$variable,
+    anova_p    = x$summary[[1]][["Pr(>F)"]][1],
+    shapiro_p  = x$shapiro$p.value
+  )
+}) %>%
+  bind_rows()
+
+results_df2
+#show not normal
+non_normal_df2 <- results_df2 %>% filter(shapiro_p <= 0.05) #TCEAL4, LUC7L2, PKP3
+non_normal_df2
+#show significant
+results_df2 %>% filter(anova_p <= 0.05) #RAD50, VPS33B, GRB7
+
+##stage Kruskal test######################################################
+kruskal_results2 <- lapply(non_normal_df2$variable, function(var) {
+  df <- HGSOC_only[, c(var, "Stage4")]
+  # df <- na.omit(df)  # remove NAs
+  test <- kruskal.test(as.formula(paste(var, "~ Stage4")), data = df)
+  
+  data.frame(
+    variable = var,
+    kruskal_p = test$p.value
+  )
+}) %>%
+  bind_rows()
+
+kruskal_results2 #not significant
+
+##stage normal anova posthoc########################################
+# Identify variables with normal residuals
+normal_vars2 <- results_df2 %>%
+  filter(shapiro_p > 0.05) %>%
+  pull(variable)
+# anova again
+anova_list2 <- lapply(normal_vars2, function(var) {
+  formula <- as.formula(paste(var, "~ Stage4"))
+  aov(formula, data = HGSOC_only)
+})
+names(anova_list2) <- normal_vars2
+# Run Tukey HSD for each ANOVA
+tukey_results2 <- lapply(normal_vars2, function(var) {
+  fit <- anova_list2[[var]]
+  post_test <- glht(fit, linfct = mcp(Stage4 = "Tukey"))
+  summary(post_test)
+})
+names(tukey_results2) <- normal_vars2
+tukey_results2
+
+##tribble all tests together STAGE #####################
+each.vs.ref_sig_stage <- tibble::tribble(
+  ~group1, ~group2, ~p.adj,   ~y.position, ~variable,
+  "II",   "III", 0.02671, -2, "RAD50", #tukey's
+  "II",   "IV", 0.00385 , -1.5, "RAD50", #tukey's
+  "III",   "IV", 0.040, -2.5, "RAD50", #tukey's
+  "II",   "III", 0.00910 , -4, "VPS33B", #tukey's
+  "II",   "IV", 1e-04 , -3, "VPS33B", #tukey's
+  "III",   "IV", 0.00877 , -5, "VPS33B", #tukey's
+  "II",   "IV", 0.0663 , -2.5, "ZFPL1", #tukey's
+  "II",   "III", 0.02572 , 0, "GRB7", #tukey's
+  "II",   "IV", 0.00355 , 1.5, "GRB7" #tukey's
+)
+# 3 digits after the ,
+each.vs.ref_sig_stage$p.adj_custom <- ifelse(each.vs.ref_sig_stage$p.adj < 0.001, 
+                                             "p < 0.001", 
+                                             paste0("p = ", sprintf("%.3f",
+                                                                    each.vs.ref_sig_stage$p.adj)))
+
+##FC STAGE ###########################################
+expression_df_stage <- HGSOC_only[, c("Stage4", expression, "KN")]
+rownames(expression_df_stage) <- expression_df_stage$KN
+expression_df_stage <- expression_df_stage[, -12]
+#REMOVE NA
+expression_df2_stage <- expression_df_stage %>%
+  filter(complete.cases(.))
+
+exp_df2_stage <- expression_df2_stage %>%
+  melt(id.vars="Stage4",  measure.vars=expression) %>%
+  rename(gene = variable) %>%
+  rename(expression = value)%>%
+  rename(condition = Stage4) %>%
+  group_by(condition, gene)%>%
+  summarise(mean_expression = mean(expression, drop_na= T)) %>%
+  spread(condition, mean_expression)
+
+mean_expression_stage <- exp_df2_stage %>%
+  mutate(fold_change_4_2 = log2(2^( `IV` - `II`) ) ) %>% 
+  mutate(fold_change_3_2 = log2(2^( `III` - `II`) ) )%>% 
+  mutate(fold_change__4_3 = log2( 2^(`IV` -`III`) ) )
+mean_expression_stage 
+##EN version stage #######################
+#melt one table for expression
+Stage_table_hgsoc <- melt(HGSOC_only[, colnames(HGSOC_only) %in%
+                                       c("Stage4", expression )],
+                          id.vars="Stage4",
+                          measure.vars= expression)
+custom_colors <- c("II" = "blue","III" = "deeppink", "IV" = "lightpink") 
+stage2plot <- ggplot(Stage_table_hgsoc, aes(x=Stage4 , y=value, fill = variable)) +
+  geom_boxplot( outlier.shape = NA , alpha=0.3, aes(fill = Stage4 )) +
+  geom_jitter(aes(color = Stage4 ), size=1, alpha=0.5) +
+  ylab(label = expression("Relative expression, normalized to " * italic("GAPDH"))) + 
+  facet_wrap(.~ variable, nrow = 2, scales = "free") +
+  add_pvalue(each.vs.ref_sig_stage, label = "p.adj_custom") + #pvalue
+  theme_minimal()+
+  theme(
+    strip.text.x = element_text(
+      size = 12, face = "bold.italic"
+    ),
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5))+
+  labs(x=NULL)+
+  stat_boxplot(geom ='errorbar')+
+  scale_fill_manual(values = custom_colors) +
+  scale_color_manual(values = custom_colors) +
+  scale_y_continuous(labels = function(x) gsub("-", "\u2212", x))+
+  scale_y_continuous(labels = function(x) 
+    gsub("-", "\u2212", as.character(x))) #add long "-" signs
+stage2plot
+
+png("10_gene_stage20251112EN.png",
+    width = 3000, height = 2300, res = 300) # width and height in pixels, resolution in dpi
+stage2plot #
+dev.off() # Close the PNG device
+
+#grade###############################
+#shapiro
+shapiro_results_grade <- OC_full[, c(18, 3:12 )] %>%
+  pivot_longer(cols = -Grade2, names_to = "gene", values_to = "value") %>%
+  group_by(Grade2, gene) %>%
+  summarise(p_value = shapiro.test(value)$p.value, .groups = "drop") %>%
+  filter(p_value < 0.05)
+shapiro_results_grade #not normal LUC7L2, PKP3, TCEAL4
+#GRADE, all OC from this point on
+table(OC_full$Grade2)
+var_results_grade <- OC_full[, c(18, 3:12 )] %>%
+  filter(Grade2 != is.na(Grade2))%>%
+  pivot_longer(cols = -Grade2, names_to = "variable", values_to = "value") %>%
+  group_by(variable) %>%
+  summarise(
+    p_value = var.test(value[Grade2 == unique(Grade2)[1]], 
+                       value[Grade2 == unique(Grade2)[2]])$p.value,
+    .groups = "drop"
+  ) %>%
+  filter(p_value < 0.05)
+var_results_grade #luc7l2 
+
+#t tests GRADE#########################################
+#not normal LUC7L2, PKP3, TCEAL4
+Grade_table <- melt(OC_only[, c(18, 3:12)], id.vars="Grade2", 
+                    measure.vars=expression)
+wilcox.test_grade <- Grade_table %>%
+  group_by(variable) %>%
+  filter(variable %in% c("LUC7L2", "PKP3", "TCEAL4")) %>%
+  summarise(
+    p_value = wilcox.test(value ~ Grade2)$p.value
+  ) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%  # Adjust p-values
+  filter(p_adj < 0.1)  # Keep significant results
+wilcox.test_grade #TCEAL4    
+#normall all else
+grade_normal <- setdiff(expression, c("LUC7L2", "PKP3", "TCEAL4"))
+stjudents.test_grade <- Grade_table %>%
+  filter(variable %in% grade_normal) %>%
+  group_by(variable) %>%
+  summarise(
+    p_value = t.test(value ~ Grade2, var.equal = TRUE)$p.value
+  ) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%  # Adjust p-values
+  filter(p_adj < 0.1)  # Keep significant results
+stjudents.test_grade #none
+
+##tribble GRADE ################
+each.vs.ref_sig_grade <- tibble::tribble(
+  ~group1, ~group2, ~p.adj,   ~y.position, ~variable,
+  "G1",   "G3", 0.0385, 1, "TCEAL4" #wilcox
+)
+
+##boxplot GRADE #############################
+Grade_table_OC <- melt(OC_only[, colnames(OC_only) %in%
+                                 c("Grade2", expression )],
+                       id.vars="Grade2",
+                       measure.vars= expression) %>%
+  drop_na(Grade2)
+
+
+custom_colors <- c("G1" = "maroon","G3" = "darkblue") 
+Grade_plot <- ggplot(Grade_table_OC, aes(x=Grade2 , y=value, fill = variable)) +
+  geom_boxplot( outlier.shape = NA , alpha=0.3, aes(fill = Grade2 )) +
+  geom_jitter(aes(color = Grade2 ), size=1, alpha=0.5) +
+  ylab(label = expression("Santykinė genų raiška, normalizuota pagal  " * italic("GAPDH"))) + 
+  facet_wrap(.~ variable, nrow = 2, scales = "free") +
+  add_pvalue(each.vs.ref_sig_grade, label = "p.adj") + #pvalue
+  theme_minimal()+
+  theme(
+    strip.text.x = element_text(
+      size = 12, face = "bold.italic"
+    ),
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5))+
+  labs(x=NULL)+
+  stat_boxplot(geom ='errorbar')+
+  scale_fill_manual(values = custom_colors) +
+  scale_color_manual(values = custom_colors) + 
+  scale_y_continuous(labels = function(x) gsub("-", "\u2212", x))
+
+
+Grade_plot
+
+##save plot####################################################
+png("10gene_grade_20251112EN.png"
+    , width = 3000, height = 2300, res = 300) # width and height in pixels, resolution in dpi
+Grade_plot 
+dev.off() # Close the PNG device
+
+##FC GRADE ##################
+expression_df_GRADE <- OC_only[, c("Grade2", expression, "KN")]
+rownames(expression_df_GRADE) <- expression_df_GRADE$KN
+expression_df_GRADE <- expression_df_GRADE[, -12]
+#REMOVE NA
+#expression_df_GRADE <- expression_df_GRADE %>%
+#  filter(complete.cases(.))
+
+exp_df_GRADE <- expression_df_GRADE %>%
+  melt(id.vars="Grade2",  measure.vars=expression) %>%
+  rename(gene = variable) %>%
+  rename(expression = value)%>%
+  rename(condition = Grade2) %>%
+  group_by(condition, gene)%>%
+  summarise(mean_expression = mean(expression, drop_na= T)) %>%
+  spread(condition, mean_expression)
+
+mean_expression_GRADE <- exp_df_GRADE %>%
+  mutate(fold_change_3_1 = log2( 2^( `G3` -`G1`) ) )
+mean_expression_GRADE 
+
+#3 groups HGSOC, others, benign ##################################
+#normalcy test, 3 groups
+shapiro_results2 <- OC_full[, c(2:12 )] %>%
+  pivot_longer(cols = -type, names_to = "gene", values_to = "value") %>%
+  group_by(type, gene) %>%
+  summarise(p_value = shapiro.test(value)$p.value, .groups = "drop") %>%
+  filter(p_value < 0.05)
+shapiro_results2 #not notmal for OC LUC7L2, PKP3, TCEAL4
+#levene test for variance, 3 groups
+levene_rez1 <- OC_full[, c(2:12)] %>%
+  pivot_longer(cols = -type , names_to = "variable", values_to = "value") %>%
+  group_by(variable) %>%
+  summarise(
+    p_value = car::leveneTest(value ~ type )$`Pr(>F)`[1],
+    .groups = "drop"
+  )
+levene_rez1  #all normal
+
+#ANOVA, type
+#LUC7L2, PKP3, TCEAL4 will use Kruskal-Wallis test
+#all equal vairances, othervise would use welch anova
+##normal anova####################################
+results <- lapply(names(OC_full)[c(3:12)], function(var) {
+  formula <- as.formula(paste(var, "~ type"))
+  fit <- aov(formula, data = OC_full)
+  
+  list(
+    variable = var,
+    summary = summary(fit),
+    shapiro = shapiro.test(residuals(fit))
+  )
+})
+
+names(results) <- names(OC_full)[c(3:12)]
+#make df of results
+results_df <- lapply(results, function(x) {
+  data.frame(
+    variable   = x$variable,
+    anova_p    = x$summary[[1]][["Pr(>F)"]][1],
+    shapiro_p  = x$shapiro$p.value
+  )
+}) %>%
+  bind_rows()
+
+results_df
+#show not normal
+non_normal_df <- results_df %>% filter(shapiro_p <= 0.05) #PPT2, LUC7L2, PKP3
+non_normal_df
+#show significant
+results_df %>% filter(anova_p <= 0.05) #all
+
+##run Kruskal test######################################################
+kruskal_results <- lapply(non_normal_df$variable, function(var) {
+  df <- OC_full[, c(var, "type")]
+  # df <- na.omit(df)  # remove NAs
+  test <- kruskal.test(as.formula(paste(var, "~ type")), data = df)
+  
+  data.frame(
+    variable = var,
+    kruskal_p = test$p.value
+  )
+}) %>%
+  bind_rows()
+
+kruskal_results #all significant as well
+
+##run normal anova posthoc########################################
+# Identify variables with normal residuals
+normal_vars <- results_df %>%
+  filter(shapiro_p > 0.05) %>%
+  pull(variable)
+# anova again
+anova_list <- lapply(normal_vars, function(var) {
+  formula <- as.formula(paste(var, "~ type"))
+  aov(formula, data = OC_full)
+})
+names(anova_list) <- normal_vars
+# Run Tukey HSD for each ANOVA
+tukey_results <- lapply(normal_vars, function(var) {
+  fit <- anova_list[[var]]
+  post_test <- glht(fit, linfct = mcp(type = "Tukey"))
+  summary(post_test)
+})
+names(tukey_results) <- normal_vars
+tukey_results
+
+##dunns tests (posthoc for kurskal)###################################
+# Run Dunn post-hoc for all non-normal variables
+dunn_results <- lapply(non_normal_df$variable, function(var) {
+  df <- OC_full[, c(var, "type")]
+  df <- na.omit(df)
+  df$type <- as.factor(df$type)
+  
+  test <- dunnTest(as.formula(paste(var, "~ type")), data = df, method = "holm")
+  
+  data.frame(
+    variable   = var,
+    comparison = test$res$Comparison,  # <- use this column instead of rownames
+    Z          = test$res$Z,
+    p_value    = test$res$P.adj
+  )
+}) %>%
+  bind_rows()
+
+# View results
+dunn_results %>%
+  filter(p_value < 0.05)
+
+##tribble all tests together 3 groups#####################
+#add manually from anovas
+each.vs.ref_sig <- 
+  each.vs.ref_sig2 <- tibble::tribble(
+    ~group1, ~group2, ~p.adj,   ~y.position, ~variable,
+    "Gerybiniai",   "HGSOC", 0.0237, -5, "EXO1", #tukey's
+    "Gerybiniai",   "Kiti KV", 0.01430, -2, "RAD50", #tukey's
+    "Gerybiniai",   "HGSOC", 0.00257, -1, "RAD50", #tukey's
+    "Gerybiniai",   "HGSOC", 0.000648 , -3, "CDCA5",  #tukey's
+    "HGSOC",   "Kiti KV", 0.068220, -2, "CDCA5",  #tukey's
+    "Gerybiniai",   "HGSOC", 0.0112, -3.5, "ZFPL1", #tukey's
+    "Gerybiniai",   "Kiti KV", 0.0138, -3, "ZFPL1",#tukey's
+    "Gerybiniai",   "HGSOC", 0.00177, -5, "VPS33B",#tukey's
+    "Gerybiniai",   "HGSOC", 1e-04, -2, "GRB7", #tukey's
+    "Gerybiniai",   "Kiti KV", 1e-04, -1, "GRB7", #tukey's
+    "Gerybiniai",   "HGSOC", 1e-04, 4, "TCEAL4",#tukey's
+    "Gerybiniai",   "Kiti KV", 0.000393 , 5, "TCEAL4", #tukey's
+    "HGSOC",   "Kiti KV", 0.000517, 3, "TCEAL4", #tukey's
+    
+    "Gerybiniai",   "HGSOC", 0.000714378, -3, "PPT2", #dunn
+    "Gerybiniai",   "HGSOC", 0.001515829, 0, "LUC7L2", #dunn
+    "Gerybiniai",   "HGSOC", 0.005000795, -5, "PKP3", #dunn
+    "Gerybiniai",   "Kiti KV", 0.003364187, -4, "PKP3", #dunn
+    
+  )
+# 3 digits after the ,
+each.vs.ref_sig$p.adj_custom <- ifelse(each.vs.ref_sig$p.adj < 0.001, 
+                                       "p < 0.001", 
+                                       paste0("p = ", sprintf("%.3f",
+                                                              each.vs.ref_sig$p.adj)))
+
+##boxplot 3 groups ########################################
+#melt one table for expression
+Group3_table_full <- melt(OC_full[, colnames(OC_full) %in%
+                                    c("type", expression )],
+                          id.vars="type",
+                          measure.vars= expression)
+#rename to lt 
+Group3_table_full$type
+Group3_table_full <- Group3_table_full %>%
+  mutate(type = case_when(
+    type == "HGSOC" ~ "HGSOC",
+    type == "Benign" ~ "Gerybiniai",
+    type == "Other" ~ "Kiti KV"
+  ))
+
+custom_colors <- c("HGSOC" = "deeppink","Kiti KV" = "lightpink", "Gerybiniai" = "blue") 
+
+
+
+##EN version 3 groups####################
+# 3 digits after the ,
+each.vs.ref_sig_en <- each.vs.ref_sig %>%
+  mutate(
+    group1 = recode(group1, "Gerybiniai" = "Benign", "Kiti KV" = "Other"),
+    group2 = recode(group2, "Gerybiniai" = "Benign", "Kiti KV" = "Other")
+  )
+
+#melt one table for expression
+Group3_table_full_en <- melt(OC_full[, colnames(OC_full) %in%
+                                       c("type", expression )],
+                             id.vars="type",
+                             measure.vars= expression)
+
+custom_colors_en <- c("HGSOC" = "deeppink","Other" = "lightpink", "Benign" = "blue") 
+OC_plot_en <- ggplot(Group3_table_full_en, aes(x=type , y=value, fill = variable)) +
+  geom_boxplot( outlier.shape = NA , alpha=0.3, aes(fill = type )) +
+  geom_jitter(aes(color = type ), size=1, alpha=0.5) +
+  ylab(label = expression("Relative expression, normalized to  " * italic("GAPDH"))) + 
+  facet_wrap(.~ variable, nrow = 2, scales = "free") +
+  add_pvalue(each.vs.ref_sig_en, label = "p.adj_custom") + #pvalue
+  theme_minimal()+
+  theme(
+    strip.text.x = element_text(
+      size = 12, face = "bold.italic"
+    ),
+    legend.position = "none",
+    plot.title = element_text(hjust = 0.5))+
+  labs(x=NULL)+
+  stat_boxplot(geom ='errorbar')+
+  scale_fill_manual(values = custom_colors_en) +
+  scale_color_manual(values = custom_colors_en) +
+  scale_y_continuous(labels = function(x) 
+    gsub("-", "\u2212", as.character(x))) #add long "-" signs
+
+OC_plot_en
+
+png("10genes_boxplot3groups_EN_20251112.png",
+    width = 3200, height = 2300, res = 300) # width and height in pixels, resolution in dpi
+OC_plot_en #
+dev.off() # Close the PNG device
+
+##FC 3 groups###########################################
+expression_df <- OC_full[, c("type", expression, "KN")]
+rownames(expression_df) <- expression_df$KN
+expression_df <- expression_df[, -12]
+#REMOVE NA
+expression_df2 <- expression_df %>%
+  filter(complete.cases(.))
+
+exp_df2 <- expression_df2 %>%
+  melt(id.vars="type",  measure.vars=expression) %>%
+  rename(gene = variable) %>%
+  rename(expression = value)%>%
+  rename(condition = type) %>%
+  group_by(condition, gene)%>%
+  summarise(mean_expression = mean(expression, drop_na= T)) %>%
+  spread(condition, mean_expression)
+
+mean_expression_OC2 <- exp_df2 %>%
+  mutate(fold_change_HB = log2(2^(`HGSOC` - `Benign`))) %>% #benign vs hgsoc 
+  mutate(fold_change_HO = log2(2^(`HGSOC` - `Other`))) %>% #others vs hgsoc 
+  mutate(fold_change_OB = log2(2^(`Other` / `Benign`))) #benign vs others
+mean_expression_OC2 
+
+
